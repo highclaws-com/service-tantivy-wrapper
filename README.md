@@ -1,4 +1,4 @@
-# Tantivy Daemon (tonyi-tantivy)
+# Tantivy Wrapper Daemon
 
 A full-text search service wrapper around [Tantivy](https://github.com/quickwit-oss/tantivy). It includes a custom Jieba tokenizer (`jieba-rs`) for robust Chinese text search support.
 
