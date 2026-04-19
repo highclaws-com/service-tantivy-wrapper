@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+.ruff_cache/
+dist/
+.venv/
+build/
+target/
+.env
