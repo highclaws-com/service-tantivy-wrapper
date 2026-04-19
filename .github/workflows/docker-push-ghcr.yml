@@ -1,0 +1,47 @@
+name: Push to ghcr
+
+on:
+  push:
+    branches: [ deploy ]
+    tags: [ 'v*' ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: recursive
+
+    - name: Build image
+      run: docker build . --file Dockerfile --tag tmp
+
+    - name: Docker registry login
+      run: >
+        echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }}
+        -u ${{ github.actor }}
+        --password-stdin
+
+    - name: Push image
+      run: |
+        IMAGE_ID=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+
+        # refs/tags/v0.3.1 ==> v0.3.1
+        VERSION=$(echo "${{ github.ref }}" | sed -e 's@.*/\(.*\)@\1@')
+        [ "$VERSION" == "deploy" ] && VERSION=latest
+
+        echo IMAGE_ID=$IMAGE_ID
+        echo VERSION=$VERSION
+
+        docker tag tmp $IMAGE_ID:$VERSION
+        docker push $IMAGE_ID:$VERSION
