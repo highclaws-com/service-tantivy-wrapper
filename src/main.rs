@@ -27,6 +27,10 @@ struct IndexRequest {
     text: String,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    start_byte: u64,
+    #[serde(default)]
+    end_byte: u64,
 }
 
 #[derive(Deserialize)]
@@ -55,16 +59,8 @@ struct SearchResponse {
     hash: String,
     score: f32,
     snippet: String,
-}
-
-#[derive(Deserialize)]
-struct DocsRequest {
-    hashes: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct DocsResponse {
-    docs: std::collections::HashMap<String, String>,
+    start_byte: u64,
+    end_byte: u64,
 }
 
 #[tokio::main]
@@ -83,6 +79,8 @@ async fn main() {
         .set_stored();
     schema_builder.add_text_field("text", text_options);
     schema_builder.add_text_field("tags", STRING);
+    schema_builder.add_u64_field("start_byte", STORED);
+    schema_builder.add_u64_field("end_byte", STORED);
 
     let schema = schema_builder.build();
 
@@ -115,7 +113,6 @@ async fn main() {
         .route("/index_docs", post(index_docs))
         .route("/delete", post(delete_docs))
         .route("/search", post(search))
-        .route("/docs", post(get_docs))
         // Set body limit to 128MB to accommodate payload up to 64MB + JSON overhead
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .with_state(state);
@@ -133,6 +130,8 @@ async fn index_docs(
     let hash_field = schema.get_field("hash").unwrap();
     let text_field = schema.get_field("text").unwrap();
     let tags_field = schema.get_field("tags").unwrap();
+    let start_byte_field = schema.get_field("start_byte").unwrap();
+    let end_byte_field = schema.get_field("end_byte").unwrap();
 
     let mut writer = state.writer.lock().await;
 
@@ -140,6 +139,8 @@ async fn index_docs(
         let mut doc = TantivyDocument::default();
         doc.add_text(hash_field, &req.hash);
         doc.add_text(text_field, &req.text);
+        doc.add_u64(start_byte_field, req.start_byte);
+        doc.add_u64(end_byte_field, req.end_byte);
         for tag in req.tags {
             doc.add_text(tags_field, &tag);
         }
@@ -180,6 +181,8 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
     let schema = state.index.schema();
     let hash_field = schema.get_field("hash").unwrap();
     let text_field = schema.get_field("text").unwrap();
+    let start_byte_field = schema.get_field("start_byte").unwrap();
+    let end_byte_field = schema.get_field("end_byte").unwrap();
 
     let mut analyzer = state.index.tokenizers().get("custom_jieba").unwrap();
     let mut token_stream = analyzer.token_stream(&query.q);
@@ -232,40 +235,18 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
         let hash = retrieved_doc.get_first(hash_field).unwrap().as_str().unwrap().to_string();
 
         let snippet = snippet_generator.snippet_from_doc(&retrieved_doc);
+        let start_byte = retrieved_doc.get_first(start_byte_field).unwrap().as_u64().unwrap();
+        let end_byte = retrieved_doc.get_first(end_byte_field).unwrap().as_u64().unwrap();
 
         results.push(SearchResponse {
             hash,
             score,
             snippet: snippet.to_html(),
+            start_byte,
+            end_byte,
         });
     }
 
     Json(results)
 }
 
-async fn get_docs(State(state): State<AppState>, Json(payload): Json<DocsRequest>) -> Json<DocsResponse> {
-    let reader = state.index.reader().unwrap();
-    let searcher = reader.searcher();
-
-    let schema = state.index.schema();
-    let hash_field = schema.get_field("hash").unwrap();
-    let text_field = schema.get_field("text").unwrap();
-
-    let mut docs = std::collections::HashMap::new();
-
-    for hash in payload.hashes {
-        let term = tantivy::Term::from_field_text(hash_field, &hash);
-        let query = tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(1)).unwrap();
-        if let Some((_, doc_address)) = top_docs.first() {
-            let retrieved_doc = searcher.doc::<TantivyDocument>(*doc_address).unwrap();
-            if let Some(text_val) = retrieved_doc.get_first(text_field) {
-                if let Some(text) = text_val.as_str() {
-                    docs.insert(hash, text.to_string());
-                }
-            }
-        }
-    }
-
-    Json(DocsResponse { docs })
-}
