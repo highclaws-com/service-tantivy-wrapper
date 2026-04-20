@@ -9,7 +9,7 @@ use tokenizer::CustomJiebaTokenizer;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
-use tantivy::schema::{IndexRecordOption, Schema, TextFieldIndexing, TextOptions, STORED, STRING, Value};
+use tantivy::schema::{IndexRecordOption, Schema, TextFieldIndexing, TextOptions, STORED, STRING, Value, FAST};
 use tantivy::tokenizer::{Language, LowerCaser, Stemmer, TextAnalyzer};
 use tantivy::{Index, IndexWriter};
 use tantivy::directory::MmapDirectory;
@@ -31,6 +31,8 @@ struct IndexRequest {
     start_byte: u64,
     #[serde(default)]
     end_byte: u64,
+    #[serde(default)]
+    mtime: u64,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +54,8 @@ struct SearchQuery {
     tags: Option<Vec<String>>,
     limit: Option<usize>,
     snippet_length: Option<usize>,
+    mtime_gte: Option<u64>,
+    mtime_lte: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -61,6 +65,7 @@ struct SearchResponse {
     snippet: String,
     start_byte: u64,
     end_byte: u64,
+    mtime: u64,
 }
 
 #[tokio::main]
@@ -81,6 +86,7 @@ async fn main() {
     schema_builder.add_text_field("tags", STRING);
     schema_builder.add_u64_field("start_byte", STORED);
     schema_builder.add_u64_field("end_byte", STORED);
+    schema_builder.add_u64_field("mtime", STORED | FAST);
 
     let schema = schema_builder.build();
 
@@ -129,9 +135,10 @@ async fn index_docs(
     let schema = state.index.schema();
     let hash_field = schema.get_field("hash").unwrap();
     let text_field = schema.get_field("text").unwrap();
-    let tags_field = schema.get_field("tags").unwrap();
     let start_byte_field = schema.get_field("start_byte").unwrap();
     let end_byte_field = schema.get_field("end_byte").unwrap();
+    let mtime_field = schema.get_field("mtime").unwrap();
+    let tags_field = schema.get_field("tags").unwrap();
 
     let mut writer = state.writer.lock().await;
 
@@ -141,6 +148,7 @@ async fn index_docs(
         doc.add_text(text_field, &req.text);
         doc.add_u64(start_byte_field, req.start_byte);
         doc.add_u64(end_byte_field, req.end_byte);
+        doc.add_u64(mtime_field, req.mtime);
         for tag in req.tags {
             doc.add_text(tags_field, &tag);
         }
@@ -181,8 +189,6 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
     let schema = state.index.schema();
     let hash_field = schema.get_field("hash").unwrap();
     let text_field = schema.get_field("text").unwrap();
-    let start_byte_field = schema.get_field("start_byte").unwrap();
-    let end_byte_field = schema.get_field("end_byte").unwrap();
 
     let mut analyzer = state.index.tokenizers().get("custom_jieba").unwrap();
     let mut token_stream = analyzer.token_stream(&query.q);
@@ -201,25 +207,36 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
         Box::new(tantivy::query::PhraseQuery::new_with_offset_and_slop(terms_with_offset, 10))
     };
 
-    let final_query: Box<dyn tantivy::query::Query> = if let Some(tags) = &query.tags {
-        if tags.is_empty() {
-            parsed_query
-        } else {
-            let tags_field = schema.get_field("tags").unwrap();
-            let mut sub_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = vec![
-                (tantivy::query::Occur::Must, parsed_query),
-            ];
+    let mut sub_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = vec![
+        (tantivy::query::Occur::Must, parsed_query),
+    ];
 
+    if let Some(tags) = &query.tags {
+        if !tags.is_empty() {
+            let tags_field = schema.get_field("tags").unwrap();
             for tag in tags {
                 let tag_term = tantivy::Term::from_field_text(tags_field, tag);
                 let tag_query = tantivy::query::TermQuery::new(tag_term, IndexRecordOption::Basic);
                 sub_queries.push((tantivy::query::Occur::Must, Box::new(tag_query)));
             }
-
-            Box::new(tantivy::query::BooleanQuery::new(sub_queries))
         }
+    }
+
+    if query.mtime_gte.is_some() || query.mtime_lte.is_some() {
+        let start = query.mtime_gte.map(std::ops::Bound::Included).unwrap_or(std::ops::Bound::Unbounded);
+        let end = query.mtime_lte.map(std::ops::Bound::Included).unwrap_or(std::ops::Bound::Unbounded);
+        let range_query = Box::new(tantivy::query::RangeQuery::new_u64_bounds(
+            "mtime".to_string(),
+            start,
+            end
+        ));
+        sub_queries.push((tantivy::query::Occur::Must, range_query));
+    }
+
+    let final_query: Box<dyn tantivy::query::Query> = if sub_queries.len() == 1 {
+        sub_queries.remove(0).1
     } else {
-        parsed_query
+        Box::new(tantivy::query::BooleanQuery::new(sub_queries))
     };
 
     let limit = query.limit.unwrap_or(10);
@@ -233,10 +250,11 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
     for (score, doc_address) in top_docs {
         let retrieved_doc = searcher.doc::<TantivyDocument>(doc_address).unwrap();
         let hash = retrieved_doc.get_first(hash_field).unwrap().as_str().unwrap().to_string();
+        let start_byte = retrieved_doc.get_first(schema.get_field("start_byte").unwrap()).map(|v| v.as_u64().unwrap_or(0)).unwrap_or(0);
+        let end_byte = retrieved_doc.get_first(schema.get_field("end_byte").unwrap()).map(|v| v.as_u64().unwrap_or(0)).unwrap_or(0);
+        let mtime = retrieved_doc.get_first(schema.get_field("mtime").unwrap()).map(|v| v.as_u64().unwrap_or(0)).unwrap_or(0);
 
         let snippet = snippet_generator.snippet_from_doc(&retrieved_doc);
-        let start_byte = retrieved_doc.get_first(start_byte_field).unwrap().as_u64().unwrap();
-        let end_byte = retrieved_doc.get_first(end_byte_field).unwrap().as_u64().unwrap();
 
         results.push(SearchResponse {
             hash,
@@ -244,6 +262,7 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
             snippet: snippet.to_html(),
             start_byte,
             end_byte,
+            mtime,
         });
     }
 
