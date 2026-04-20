@@ -191,7 +191,7 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
     }
 
     let parsed_query: Box<dyn tantivy::query::Query> = if terms_with_offset.is_empty() {
-        Box::new(tantivy::query::EmptyQuery)
+        Box::new(tantivy::query::AllQuery)
     } else if terms_with_offset.len() == 1 {
         Box::new(tantivy::query::TermQuery::new(terms_with_offset[0].1.clone(), IndexRecordOption::WithFreqsAndPositions))
     } else {
