@@ -22,8 +22,11 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Build image
-      run: docker build . --file Dockerfile --tag tmp
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
 
     - name: Docker registry login
       run: >
@@ -43,5 +46,4 @@ jobs:
         echo IMAGE_ID=$IMAGE_ID
         echo VERSION=$VERSION
 
-        docker tag tmp $IMAGE_ID:$VERSION
-        docker push $IMAGE_ID:$VERSION
+        docker buildx build --push --platform linux/amd64,linux/arm64 -t $IMAGE_ID:$VERSION -f Dockerfile .

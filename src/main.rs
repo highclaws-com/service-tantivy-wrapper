@@ -183,6 +183,9 @@ async fn delete_docs(
 }
 
 async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -> Json<Vec<SearchResponse>> {
+    println!("--- SEARCH REQUEST ---");
+    println!("q: {:?}, tags: {:?}, mtime_gte: {:?}, mtime_lte: {:?}", query.q, query.tags, query.mtime_gte, query.mtime_lte);
+
     let reader = state.index.reader().unwrap();
     let searcher = reader.searcher();
 
@@ -199,17 +202,16 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
         terms_with_offset.push((token.position, term));
     }
 
-    let parsed_query: Box<dyn tantivy::query::Query> = if terms_with_offset.is_empty() {
-        Box::new(tantivy::query::AllQuery)
-    } else if terms_with_offset.len() == 1 {
-        Box::new(tantivy::query::TermQuery::new(terms_with_offset[0].1.clone(), IndexRecordOption::WithFreqsAndPositions))
-    } else {
-        Box::new(tantivy::query::PhraseQuery::new_with_offset_and_slop(terms_with_offset, 10))
-    };
+    let mut sub_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
 
-    let mut sub_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = vec![
-        (tantivy::query::Occur::Must, parsed_query),
-    ];
+    if !terms_with_offset.is_empty() {
+        let parsed_query: Box<dyn tantivy::query::Query> = if terms_with_offset.len() == 1 {
+            Box::new(tantivy::query::TermQuery::new(terms_with_offset[0].1.clone(), IndexRecordOption::WithFreqsAndPositions))
+        } else {
+            Box::new(tantivy::query::PhraseQuery::new_with_offset_and_slop(terms_with_offset, 10))
+        };
+        sub_queries.push((tantivy::query::Occur::Must, parsed_query));
+    }
 
     if let Some(tags) = &query.tags {
         if !tags.is_empty() {
@@ -233,14 +235,18 @@ async fn search(State(state): State<AppState>, Json(query): Json<SearchQuery>) -
         sub_queries.push((tantivy::query::Occur::Must, range_query));
     }
 
-    let final_query: Box<dyn tantivy::query::Query> = if sub_queries.len() == 1 {
+    let final_query: Box<dyn tantivy::query::Query> = if sub_queries.is_empty() {
+        Box::new(tantivy::query::AllQuery)
+    } else if sub_queries.len() == 1 {
         sub_queries.remove(0).1
     } else {
         Box::new(tantivy::query::BooleanQuery::new(sub_queries))
     };
 
     let limit = query.limit.unwrap_or(10);
+    println!("Executing search with final_query: {:?}", final_query);
     let top_docs = searcher.search(&final_query, &TopDocs::with_limit(limit)).unwrap();
+    println!("Found {} top docs", top_docs.len());
 
     let mut snippet_generator = tantivy::SnippetGenerator::create(&searcher, &*final_query, text_field).unwrap();
     let snippet_length = query.snippet_length.unwrap_or(150);
