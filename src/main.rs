@@ -2,7 +2,7 @@ mod tokenizer;
 
 use axum::{
     extract::{State, DefaultBodyLimit},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use tokenizer::CustomJiebaTokenizer;
@@ -116,6 +116,7 @@ async fn main() {
     };
 
     let app = Router::new()
+        .route("/health", get(health))
         .route("/index_docs", post(index_docs))
         .route("/delete", post(delete_docs))
         .route("/search", post(search))
@@ -126,6 +127,10 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
     println!("Tantivy FTS daemon running on http://0.0.0.0:8080");
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn health() -> Json<&'static str> {
+    Json("ok")
 }
 
 async fn index_docs(
