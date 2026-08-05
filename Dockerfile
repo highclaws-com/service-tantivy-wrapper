@@ -19,7 +19,7 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 
 # Install necessary runtime dependencies (e.g. for openssl)
-RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libssl-dev ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled Rust binary from the builder
 COPY --from=builder /usr/src/tantivy_daemon/target/release/tantivy_daemon /usr/local/bin/tantivy_daemon
